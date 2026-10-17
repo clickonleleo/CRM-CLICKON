@@ -23350,3 +23350,84 @@ grant execute on function public.fn_decrypt_oauth(bytea) to service_role;
 grant execute on function public.fn_encrypt_oauth(text) to service_role;
 grant execute on function public.fn_lgpd_cascade_redact_contact(uuid, uuid, uuid) to service_role;
 grant execute on function public.fn_update_budget_consumption() to service_role;
+
+-- ---- seat_limit_per_org (migration 0233) ----
+-- Limite de usuários ativos por organização. Bloqueia convites quando atingido.
+-- Coluna em `organizations` (não em `settings` jsonb) porque o caminho é o HOT
+-- path do convite — `issueInvite` consulta TODA criação de convite.
+alter table public.organizations
+  add column if not exists seat_limit integer not null default 5
+  check (seat_limit >= 1);
+
+comment on column public.organizations.seat_limit is
+  'Teto de usuários ativos por organização. Bloqueia convites quando atingido. Default 5.';
+
+-- Contador de membros ativos (accepted_at não nulo, revoked_at nulo).
+-- security definer: este contador é chamado por `issueInvite` como usuário
+-- autenticado, e a policy de `user_organizations` esconde linhas de outras
+-- orgs. Sem definer, o convite da org X contaria 0 e o seat_limit seria
+-- inútil, todo convite passaria.
+create or replace function public.fn_count_active_members(p_org uuid)
+returns integer
+language sql
+security definer
+set search_path = public, pg_temp
+stable
+as $$
+  select count(*)::integer
+  from public.user_organizations
+  where organization_id = p_org
+    and accepted_at is not null
+    and revoked_at is null;
+$$;
+
+revoke all on function public.fn_count_active_members(uuid) from public, anon;
+grant execute on function public.fn_count_active_members(uuid) to authenticated, service_role;
+
+-- `fn_create_tenant_with_owner` lê seat_limit do jsonb. Default 5 quando ausente.
+create or replace function public.fn_create_tenant_with_owner(
+  p_actor uuid, p_key uuid, p_request jsonb, p_hash text
+) returns jsonb language plpgsql security definer set search_path = public, pg_temp as $$
+declare
+  prior public.idempotency_keys%rowtype;
+  org public.organizations%rowtype;
+  v_seat_limit integer;
+  result jsonb;
+begin
+  if not exists (select 1 from public.platform_admins where user_id = p_actor
+    and revoked_at is null and scope = 'full') then
+    raise exception 'platform_admin_required' using errcode = '42501';
+  end if;
+  perform pg_advisory_xact_lock(hashtextextended(p_actor::text || ':' || p_key::text, 0));
+  select * into prior from public.idempotency_keys
+    where key = p_key::text and endpoint = '/api/v1/admin/tenants:' || p_actor::text
+      and expires_at > now();
+  if found then
+    if prior.request_hash <> decode(p_hash, 'hex') then
+      raise exception 'idempotency_conflict' using errcode = '22023';
+    end if;
+    return prior.response_body || jsonb_build_object('created', false);
+  end if;
+  begin
+    v_seat_limit := case
+      when p_request->>'seat_limit' is null or p_request->>'seat_limit' = '' then null
+      else (p_request->>'seat_limit')::integer
+    end;
+  exception when others then
+    v_seat_limit := null;
+  end;
+  insert into public.organizations(display_name, slug, legal_name, cnpj, status, settings, created_by, seat_limit)
+    values (p_request->>'display_name', p_request->>'slug', coalesce(nullif(p_request->>'legal_name', ''), p_request->>'display_name'),
+      p_request->>'cnpj', 'active', jsonb_build_object('plan', p_request->>'plan'), p_actor, v_seat_limit)
+    returning * into org;
+  insert into public.user_organizations(organization_id, user_id, role, accepted_at)
+    values (org.id, p_actor, 'admin', now());
+  result := jsonb_build_object('id', org.id, 'slug', org.slug, 'display_name', org.display_name,
+    'invite_id', gen_random_uuid(), 'issued_at', floor(extract(epoch from now()))::bigint);
+  insert into public.idempotency_keys(organization_id, key, endpoint, request_hash, status_code, response_body)
+    values (org.id, p_key::text, '/api/v1/admin/tenants:' || p_actor::text,
+      decode(p_hash, 'hex'), 201, result);
+  return result || jsonb_build_object('created', true);
+end $$;
+revoke all on function public.fn_create_tenant_with_owner(uuid, uuid, jsonb, text) from public, anon, authenticated;
+grant execute on function public.fn_create_tenant_with_owner(uuid, uuid, jsonb, text) to service_role;

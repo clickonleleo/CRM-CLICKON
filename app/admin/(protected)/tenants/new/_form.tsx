@@ -86,6 +86,7 @@ export function NewTenantForm() {
       legal_name: "",
       cnpj: "",
       plan: "standard",
+      seat_limit: 5,
       owner_email: "",
     },
   });
@@ -123,6 +124,7 @@ export function NewTenantForm() {
         legal_name: values.legal_name || undefined,
         cnpj: values.cnpj || undefined,
         plan: values.plan,
+        seat_limit: values.seat_limit,
         owner_email: values.owner_email,
         owner_interface_settings: ownerInterface,
       });
@@ -296,6 +298,32 @@ export function NewTenantForm() {
               </Select>
               {errors.plan && (
                 <p className="text-xs text-error-fg">{t(errors.plan.message ?? "")}</p>
+              )}
+            </div>
+
+            {/* seat_limit — teto de usuários ativos. Default 5 (uso típico: 1
+                dono + 1 gerente + 3 atendentes). Pode ser mudado depois pela
+                tela do tenant. O Zod rejeita < 1 e > 10000. */}
+            <div className="space-y-1.5">
+              <Label htmlFor="seat_limit">
+                {t("Limite de usuários")} <span className="text-error-fg">*</span>
+              </Label>
+              <Input
+                id="seat_limit"
+                type="number"
+                min={1}
+                max={10000}
+                {...register("seat_limit", { valueAsNumber: true })}
+                aria-invalid={!!errors.seat_limit}
+                className="font-mono"
+              />
+              <p className="text-xs text-muted-foreground">
+                {t(
+                  "Número máximo de pessoas que podem ser convidadas. Bloqueia novos convites ao atingir.",
+                )}
+              </p>
+              {errors.seat_limit && (
+                <p className="text-xs text-error-fg">{t(errors.seat_limit.message ?? "")}</p>
               )}
             </div>
 

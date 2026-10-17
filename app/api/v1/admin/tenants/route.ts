@@ -78,6 +78,7 @@ export async function GET(req: NextRequest) {
       legal_name,
       cnpj,
       status,
+      seat_limit,
       onboarded_at,
       suspended_at,
       created_at,
@@ -240,6 +241,13 @@ export async function POST(req: NextRequest) {
           inviteId: org.invite_id,
           issuedAt: org.issued_at,
           dispatch: org.created,
+          // O owner foi inserido em `user_organizations` na MESMA transação
+          // do `fn_create_tenant_with_owner` (linha 30-31 do RPC: `role = 'admin',
+          // accepted_at = now()`). Se checássemos aqui, `fn_count_active_members`
+          // retornaria 1 e o convite do PRÓPRIO dono seria bloqueado. `skipSeatLimitCheck`
+          // é a saída que essa transação atômica exige. O limite vale a partir do
+          // PRÓXIMO convite, que é o que o usuário espera.
+          skipSeatLimitCheck: true,
         });
   return ok(
     {
